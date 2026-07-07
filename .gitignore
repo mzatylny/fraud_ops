@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+models/*.joblib
+data/*.csv
+data/*.db
+reports/*.csv
+reports/*.json
+.pytest_cache/
