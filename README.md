@@ -1,4 +1,4 @@
-# Fraud Operations Platform — Wow Bachelor Project Prototype
+# Fraud Operations Platform — BBachelor Project Prototype
 
 This is an end-to-end fraud detection platform prototype, designed to look like a real system rather than a single notebook experiment.
 
