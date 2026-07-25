@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 from typing import Any
 
 import joblib
@@ -16,12 +15,29 @@ _STAGE1 = None
 _STAGE2 = None
 
 
-def load_models():
+class ModelArtifactError(RuntimeError):
+    """Raised when trained model artifacts are unavailable or invalid."""
+
+
+def load_models() -> tuple[Any, Any]:
     global _STAGE1, _STAGE2
-    if _STAGE1 is None:
-        _STAGE1 = joblib.load(MODELS_DIR / "stage1_model.joblib")
-    if _STAGE2 is None:
-        _STAGE2 = joblib.load(MODELS_DIR / "stage2_model.joblib")
+    stage1_path = MODELS_DIR / "stage1_model.joblib"
+    stage2_path = MODELS_DIR / "stage2_model.joblib"
+    missing = [str(path) for path in (stage1_path, stage2_path) if not path.exists()]
+    if missing:
+        raise ModelArtifactError(
+            "Model artifacts are missing. Run `python train_models.py` first. Missing: "
+            + ", ".join(missing)
+        )
+    try:
+        if _STAGE1 is None:
+            _STAGE1 = joblib.load(stage1_path)
+        if _STAGE2 is None:
+            _STAGE2 = joblib.load(stage2_path)
+    except Exception as exc:
+        _STAGE1 = None
+        _STAGE2 = None
+        raise ModelArtifactError(f"Could not load model artifacts: {exc}") from exc
     return _STAGE1, _STAGE2
 
 
@@ -54,8 +70,12 @@ def score_transaction(features_df: pd.DataFrame, raw_features: dict[str, float])
     stage1, stage2 = load_models()
     start = time.perf_counter()
     p1 = float(stage1.predict_proba(features_df)[0, 1])
+    if not np.isfinite(p1) or not 0 <= p1 <= 1:
+        raise ModelArtifactError("Stage 1 returned an invalid probability")
     if p1 >= STAGE1_THRESHOLD:
         p2 = float(stage2.predict_proba(features_df)[0, 1])
+        if not np.isfinite(p2) or not 0 <= p2 <= 1:
+            raise ModelArtifactError("Stage 2 returned an invalid probability")
         layer = "Stage 2 (Advanced)"
         score = p2
     else:

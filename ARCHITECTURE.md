@@ -1,34 +1,41 @@
 # Architecture
 
 ```mermaid
-flowchart LR
-    A[Handbook-inspired simulator] --> B[Dataset CSV]
-    B --> C[Batch Feature Engineering]
-    C --> D[Model Training and Evaluation]
-    D --> E1[Stage 1 Fast Screen]
-    D --> E2[Stage 2 Stacked Ensemble]
-    B --> F[Live Stream Simulator]
-    F --> G[Online Feature Store]
+flowchart TD
+    A[Handbook-inspired simulator] --> B[Transaction dataset]
+    B --> C[Batch feature engineering]
+    C --> D[Temporal model evaluation]
+    D --> E1[Stage 1 logistic screen]
+    D --> E2[Stage 2 soft-voting ensemble]
+    B --> F[Live event playback]
+    F --> G[Online feature preview]
     G --> E1
-    E1 -->|Low risk| H[Decision Engine]
+    E1 -->|Low risk| H[Decision engine]
     E1 -->|Suspicious| E2
     E2 --> H
-    H --> I[(SQLite Operations DB)]
-    I --> J[Streamlit Monitoring]
-    I --> K[Analyst Review Queue]
-    K --> L[Confirmed Fraud / False Positive Feedback]
+    H --> I[(SQLite operations database)]
+    I --> J[Monitoring dashboard]
+    I --> K[Analyst review queue]
+    K --> L[Audited feedback]
 ```
 
 ## Data flow
 
-1. The simulator creates customers, terminals, legitimate transactions, and fraud scenarios.
-2. Batch feature engineering creates leakage-controlled historical features.
-3. The training script evaluates multiple models and saves the best two-stage architecture.
-4. The Streamlit app simulates transactions arriving over time.
-5. The online feature store computes current behavioural features.
-6. Stage 1 quickly approves low-risk transactions.
-7. Stage 2 analyses suspicious transactions with a stronger ensemble.
-8. The decision engine routes transactions to approve, manual review, or block.
-9. The analyst queue records review outcomes and notes.
-10. Monitoring views show routing efficiency, latency, actions, review outcomes, and model evaluation.
-```
+1. The simulator creates customer and terminal profiles, legitimate events, and five temporal fraud scenarios.
+2. Batch feature engineering calculates each behavioural feature using only prior events.
+3. A chronological split reserves the latest 25% of events for testing.
+4. Candidate models are evaluated and the Stage 1 and Stage 2 artifacts are persisted with experiment metadata.
+5. The dashboard selects an ordered event sample and submits one event per responsive UI rerun.
+6. The online feature store previews the event without mutating historical state.
+7. Stage 1 scores every event; only suspicious events invoke the stronger Stage 2 ensemble.
+8. The validated decision engine routes the score to approve, manual review, or block.
+9. The event is inserted into SQLite. Only after successful persistence is the online feature state committed.
+10. Review status transitions and notes are validated and appended to an audit history.
+
+## Reliability boundaries
+
+- The prototype assumes a single in-process event worker and chronological event time.
+- Customer and terminal events older than committed state are rejected.
+- SQLite uses WAL mode and a busy timeout, but it is not a substitute for a multi-node production database.
+- Generated model artifacts are local and intentionally excluded from Git.
+- Analyst identity and role-based access are outside the prototype scope.

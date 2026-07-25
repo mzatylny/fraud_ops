@@ -9,11 +9,12 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from pathlib import Path
+from datetime import datetime, timezone
 
 import joblib
 import numpy as np
 import pandas as pd
+import sklearn
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -24,11 +25,20 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from src.config import METRICS_CSV, MODELS_DIR, REPORTS_DIR, STAGE1_THRESHOLD, THRESHOLD_CSV
+from src.config import (
+    BLOCK_THRESHOLD,
+    DEFAULT_CUSTOMER_AVG_AMOUNT,
+    EXPERIMENT_METADATA_JSON,
+    METRICS_CSV,
+    MODELS_DIR,
+    REPORTS_DIR,
+    REVIEW_THRESHOLD,
+    STAGE1_THRESHOLD,
+    THRESHOLD_CSV,
+)
 from src.dataset_generator import SimulationConfig, build_dataset
 from src.features import build_batch_features
 from src.model_wrappers import ProbabilityAveragingEnsemble
@@ -69,12 +79,33 @@ def build_models() -> dict[str, object]:
     }
 
 
-def temporal_split(X: pd.DataFrame, y: pd.Series, enriched: pd.DataFrame, test_ratio: float = 0.25):
-    enriched = enriched.sort_values("tx_datetime").reset_index(drop=True)
-    split_idx = int(len(enriched) * (1 - test_ratio))
-    train_idx = enriched.index[:split_idx]
-    test_idx = enriched.index[split_idx:]
-    return X.loc[train_idx], X.loc[test_idx], y.loc[train_idx], y.loc[test_idx], enriched.loc[test_idx]
+def temporal_split(
+    X: pd.DataFrame,
+    y: pd.Series,
+    enriched: pd.DataFrame,
+    test_ratio: float = 0.25,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.DataFrame]:
+    """Split chronologically while preserving alignment across all three objects."""
+    if not 0 < test_ratio < 1:
+        raise ValueError("test_ratio must be between 0 and 1")
+    if not (len(X) == len(y) == len(enriched)):
+        raise ValueError("X, y, and enriched must contain the same number of rows")
+    if len(enriched) < 8:
+        raise ValueError("at least 8 transactions are required for a temporal split")
+
+    order = enriched.assign(_position=np.arange(len(enriched))).sort_values(
+        ["tx_datetime", "transaction_id"]
+    )["_position"].to_numpy()
+    split_idx = int(len(order) * (1 - test_ratio))
+    train_positions = order[:split_idx]
+    test_positions = order[split_idx:]
+    return (
+        X.iloc[train_positions].reset_index(drop=True),
+        X.iloc[test_positions].reset_index(drop=True),
+        y.iloc[train_positions].reset_index(drop=True),
+        y.iloc[test_positions].reset_index(drop=True),
+        enriched.iloc[test_positions].reset_index(drop=True),
+    )
 
 
 def threshold_metrics(y_true: pd.Series, y_prob: np.ndarray, threshold: float = 0.5) -> dict[str, float]:
@@ -98,12 +129,18 @@ def threshold_metrics(y_true: pd.Series, y_prob: np.ndarray, threshold: float = 
 
 
 def precision_at_k(y_true: pd.Series, y_prob: np.ndarray, k_percent: float = 1.0) -> float:
+    if len(y_true) == 0:
+        raise ValueError("y_true must not be empty")
+    if not 0 < k_percent <= 100:
+        raise ValueError("k_percent must be between 0 and 100")
     k = max(1, int(len(y_true) * k_percent / 100))
     idx = np.argsort(y_prob)[::-1][:k]
     return float(np.mean(np.asarray(y_true)[idx]))
 
 
 def latency_ms(model: object, X_test: pd.DataFrame, sample_size: int = 1000) -> float:
+    if X_test.empty:
+        raise ValueError("X_test must not be empty")
     sample = X_test.sample(min(sample_size, len(X_test)), random_state=42)
     start = time.perf_counter()
     _ = model.predict_proba(sample)
@@ -120,6 +157,8 @@ def sweep_thresholds(y_true: pd.Series, y_prob: np.ndarray) -> pd.DataFrame:
 
 
 def simulate_two_stage(stage1: object, stage2: object, X_test: pd.DataFrame) -> tuple[np.ndarray, float, float]:
+    if X_test.empty:
+        raise ValueError("X_test must not be empty")
     start = time.perf_counter()
     p1 = stage1.predict_proba(X_test)[:, 1]
     probs = p1.copy()
@@ -158,6 +197,11 @@ def main() -> None:
     print("\n2) Building behavioural features...")
     X, y, enriched = build_batch_features(tx)
     X_train, X_test, y_train, y_test, test_rows = temporal_split(X, y, enriched)
+    if y_train.nunique() < 2 or y_test.nunique() < 2:
+        raise RuntimeError(
+            "The temporal train/test split does not contain both classes. "
+            "Generate more transactions or increase the number of simulated days."
+        )
 
     print("\n3) Training model candidates...")
     models = build_models()
@@ -201,19 +245,32 @@ def main() -> None:
     joblib.dump(fitted["Advanced Soft-Voting Ensemble"], MODELS_DIR / "stage2_model.joblib")
 
     metadata = {
+        "artifact_version": 2,
+        "trained_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "n_transactions": int(len(tx)),
         "fraud_rate": float(tx.tx_fraud.mean()),
         "n_train": int(len(X_train)),
         "n_test": int(len(X_test)),
         "stage1_threshold": STAGE1_THRESHOLD,
+        "review_threshold": REVIEW_THRESHOLD,
+        "block_threshold": BLOCK_THRESHOLD,
         "stage2_call_rate": float(stage2_call_rate),
         "features": list(X.columns),
+        "feature_count": int(X.shape[1]),
+        "cold_start_customer_avg_amount": DEFAULT_CUSTOMER_AVG_AMOUNT,
+        "test_start": pd.Timestamp(test_rows["tx_datetime"].min()).isoformat(),
+        "test_end": pd.Timestamp(test_rows["tx_datetime"].max()).isoformat(),
+        "versions": {
+            "numpy": np.__version__,
+            "pandas": pd.__version__,
+            "scikit_learn": sklearn.__version__,
+        },
     }
-    with open(REPORTS_DIR / "experiment_metadata.json", "w", encoding="utf-8") as f:
+    with open(EXPERIMENT_METADATA_JSON, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
     print("\n--- MODEL COMPARISON FOR REPORT ---")
-    print(results_df.round(4).to_markdown())
+    print(results_df.round(4).to_string())
     print(f"\nSaved metrics to {METRICS_CSV}")
     print(f"Saved threshold sweep to {THRESHOLD_CSV}")
     print("Saved models to models/stage1_model.joblib and models/stage2_model.joblib")

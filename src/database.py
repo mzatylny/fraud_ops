@@ -3,19 +3,37 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
 
 from .config import DB_PATH
 
+VALID_REVIEW_STATUSES = {
+    "PENDING",
+    "UNDER_REVIEW",
+    "CONFIRMED_FRAUD",
+    "FALSE_POSITIVE",
+}
+ALLOWED_STATUS_TRANSITIONS = {
+    "PENDING": {"UNDER_REVIEW", "CONFIRMED_FRAUD", "FALSE_POSITIVE"},
+    "UNDER_REVIEW": {"CONFIRMED_FRAUD", "FALSE_POSITIVE"},
+    "CONFIRMED_FRAUD": {"UNDER_REVIEW"},
+    "FALSE_POSITIVE": {"UNDER_REVIEW"},
+}
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
 
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -23,8 +41,8 @@ def init_db(reset: bool = False) -> None:
     with _connect() as conn:
         cur = conn.cursor()
         if reset:
-            cur.execute("DROP TABLE IF EXISTS transactions")
             cur.execute("DROP TABLE IF EXISTS review_events")
+            cur.execute("DROP TABLE IF EXISTS transactions")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS transactions (
@@ -61,15 +79,27 @@ def init_db(reset: bool = False) -> None:
                 new_status TEXT,
                 notes TEXT,
                 event_time TEXT,
-                FOREIGN KEY(tx_id) REFERENCES transactions(tx_id)
+                FOREIGN KEY(tx_id) REFERENCES transactions(tx_id) ON DELETE CASCADE
             )
             """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transactions_review_queue "
+            "ON transactions(action, status, risk_score DESC)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transactions_datetime "
+            "ON transactions(tx_datetime DESC)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_review_events_tx_id "
+            "ON review_events(tx_id, event_time DESC)"
         )
         conn.commit()
 
 
 def insert_transaction(record: dict[str, Any]) -> None:
-    now = datetime.utcnow().isoformat(timespec="seconds")
+    now = _utc_now()
     status = "PENDING" if record["action"] == "REVIEW" else "AUTO_RESOLVED"
     values = {
         "tx_id": record["tx_id"],
@@ -97,11 +127,12 @@ def insert_transaction(record: dict[str, Any]) -> None:
     cols = ",".join(values.keys())
     placeholders = ",".join("?" for _ in values)
     with _connect() as conn:
-        conn.execute(f"INSERT OR REPLACE INTO transactions ({cols}) VALUES ({placeholders})", tuple(values.values()))
+        conn.execute(f"INSERT INTO transactions ({cols}) VALUES ({placeholders})", tuple(values.values()))
         conn.commit()
 
 
 def get_transactions(limit: int = 500) -> pd.DataFrame:
+    limit = max(1, min(int(limit), 10_000))
     with _connect() as conn:
         return pd.read_sql_query(
             "SELECT * FROM transactions ORDER BY tx_datetime DESC LIMIT ?",
@@ -111,6 +142,9 @@ def get_transactions(limit: int = 500) -> pd.DataFrame:
 
 
 def get_review_cases(status: str | None = None, limit: int = 500) -> pd.DataFrame:
+    if status is not None and status not in VALID_REVIEW_STATUSES:
+        raise ValueError(f"unknown review status: {status}")
+    limit = max(1, min(int(limit), 10_000))
     query = "SELECT * FROM transactions WHERE action='REVIEW'"
     params: list[Any] = []
     if status:
@@ -123,10 +157,20 @@ def get_review_cases(status: str | None = None, limit: int = 500) -> pd.DataFram
 
 
 def update_transaction_status(tx_id: str, new_status: str, notes: str = "") -> None:
-    now = datetime.utcnow().isoformat(timespec="seconds")
+    if new_status not in VALID_REVIEW_STATUSES:
+        raise ValueError(f"unknown review status: {new_status}")
+    now = _utc_now()
     with _connect() as conn:
-        old = conn.execute("SELECT status FROM transactions WHERE tx_id=?", (tx_id,)).fetchone()
-        old_status = old[0] if old else "UNKNOWN"
+        old = conn.execute(
+            "SELECT status, action FROM transactions WHERE tx_id=?", (tx_id,)
+        ).fetchone()
+        if old is None:
+            raise KeyError(f"transaction not found: {tx_id}")
+        old_status, action = old
+        if action != "REVIEW":
+            raise ValueError("only transactions routed to REVIEW can enter the analyst workflow")
+        if old_status != new_status and new_status not in ALLOWED_STATUS_TRANSITIONS.get(old_status, set()):
+            raise ValueError(f"invalid status transition: {old_status} -> {new_status}")
         conn.execute(
             "UPDATE transactions SET status=?, analyst_notes=?, updated_at=? WHERE tx_id=?",
             (new_status, notes, now, tx_id),
@@ -136,6 +180,16 @@ def update_transaction_status(tx_id: str, new_status: str, notes: str = "") -> N
             (tx_id, old_status, new_status, notes, now),
         )
         conn.commit()
+
+
+def get_review_history(tx_id: str) -> pd.DataFrame:
+    with _connect() as conn:
+        return pd.read_sql_query(
+            "SELECT old_status, new_status, notes, event_time "
+            "FROM review_events WHERE tx_id=? ORDER BY event_time DESC, id DESC",
+            conn,
+            params=(tx_id,),
+        )
 
 
 def analytics_snapshot(limit: int = 5000) -> dict[str, Any]:
@@ -152,5 +206,7 @@ def analytics_snapshot(limit: int = 5000) -> dict[str, Any]:
     }
     resolved = df[df["status"].isin(["CONFIRMED_FRAUD", "FALSE_POSITIVE"])]
     if not resolved.empty:
-        snapshot["analyst_precision"] = float((resolved["status"] == "CONFIRMED_FRAUD").mean())
+        snapshot["analyst_confirmed_fraud_rate"] = float(
+            (resolved["status"] == "CONFIRMED_FRAUD").mean()
+        )
     return snapshot

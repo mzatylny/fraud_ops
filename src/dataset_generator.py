@@ -8,12 +8,8 @@ project can support a dashboard and analyst workflow.
 
 from __future__ import annotations
 
-import math
-import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -30,7 +26,33 @@ class SimulationConfig:
     start_date: str = "2024-01-01"
     random_state: int = 42
     max_transactions: int | None = None
-    target_max_fraud_rate: float = 0.012
+    target_max_fraud_rate: float = 0.01
+
+    def __post_init__(self) -> None:
+        integer_fields = {
+            "n_customers": self.n_customers,
+            "n_terminals": self.n_terminals,
+            "n_days": self.n_days,
+        }
+        for name, value in integer_fields.items():
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.n_days < 7:
+            raise ValueError("n_days must be at least 7 to simulate temporal fraud scenarios")
+        if not np.isfinite(self.radius) or self.radius <= 0:
+            raise ValueError("radius must be a positive finite number")
+        if self.max_transactions is not None and (
+            not isinstance(self.max_transactions, int)
+            or isinstance(self.max_transactions, bool)
+            or self.max_transactions <= 0
+        ):
+            raise ValueError("max_transactions must be a positive integer or None")
+        if not 0 < self.target_max_fraud_rate < 1:
+            raise ValueError("target_max_fraud_rate must be between 0 and 1")
+        try:
+            datetime.fromisoformat(self.start_date)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("start_date must be an ISO-8601 date or datetime") from exc
 
 
 COUNTRIES = ["US", "UK", "DE", "FR", "CH", "CA", "AU", "JP", "BR", "PL", "ES", "IT"]
@@ -120,7 +142,6 @@ def generate_legitimate_transactions(
     customers: pd.DataFrame, terminals: pd.DataFrame, cfg: SimulationConfig
 ) -> pd.DataFrame:
     rng = np.random.default_rng(cfg.random_state + 101)
-    random.seed(cfg.random_state + 101)
     start = datetime.fromisoformat(cfg.start_date)
     terminal_lookup = terminals.set_index("terminal_id")
     rows = []
@@ -191,7 +212,6 @@ def add_fraud_scenarios(
     scenarios create richer streaming system behaviour.
     """
     rng = np.random.default_rng(cfg.random_state + 202)
-    random.seed(cfg.random_state + 202)
     df = df.copy()
 
     # Scenario 1: obvious large amount validation pattern.
@@ -232,14 +252,14 @@ def add_fraud_scenarios(
     extra_rows = []
     next_id = int(df["transaction_id"].max()) + 1 if not df.empty else 0
     start = datetime.fromisoformat(cfg.start_date)
-    n_card_testing_customers = max(5, min(len(customer_ids), int(len(df) * 0.0006)))
+    n_card_testing_customers = min(len(customer_ids), max(1, int(len(df) * 0.0006)))
     sample_customers = rng.choice(customer_ids, size=n_card_testing_customers, replace=False)
     high_risk_terminals = terminals.sort_values("terminal_risk_score", ascending=False).head(250)
     for cid in sample_customers:
-        burst_day = int(rng.integers(3, max(4, cfg.n_days - 3)))
+        burst_day = int(rng.integers(1, cfg.n_days - 1))
         base_dt = start + timedelta(days=burst_day, seconds=int(rng.integers(0, 86400)))
         for j in range(int(rng.integers(3, 8))):
-            terminal = high_risk_terminals.sample(1, random_state=int(cid) + j).iloc[0]
+            terminal = high_risk_terminals.iloc[int(rng.integers(0, len(high_risk_terminals)))]
             dt = base_dt + timedelta(seconds=45 * j)
             extra_rows.append(
                 {
@@ -267,7 +287,7 @@ def add_fraud_scenarios(
             next_id += 1
 
     # Scenario 5: stealthy account takeover, not always high amount.
-    n_stealth_customers = max(5, min(len(customer_ids), int(len(customer_ids) * 0.006)))
+    n_stealth_customers = min(len(customer_ids), max(1, int(len(customer_ids) * 0.006)))
     for cid in rng.choice(customer_ids, size=n_stealth_customers, replace=False):
         customer_mask = df["customer_id"] == cid
         idx = df.index[customer_mask & (df["tx_time_days"] > cfg.n_days // 3)].tolist()
@@ -283,11 +303,10 @@ def add_fraud_scenarios(
     if extra_rows:
         df = pd.concat([df, pd.DataFrame(extra_rows)], ignore_index=True)
 
-
     # Calibrate to a strongly imbalanced fraud rate, as in realistic card-fraud work.
     fraud_idx = df.index[df["tx_fraud"] == 1].to_numpy()
-    max_frauds = int(len(df) * cfg.target_max_fraud_rate)
-    if len(fraud_idx) > max_frauds and max_frauds > 0:
+    max_frauds = max(1, int(len(df) * cfg.target_max_fraud_rate))
+    if len(fraud_idx) > max_frauds:
         keep = set(rng.choice(fraud_idx, size=max_frauds, replace=False).tolist())
         drop = [idx for idx in fraud_idx if idx not in keep]
         df.loc[drop, "tx_fraud"] = 0
@@ -306,6 +325,10 @@ def build_dataset(cfg: SimulationConfig = SimulationConfig()) -> tuple[pd.DataFr
     customers = generate_customer_profiles(cfg.n_customers, cfg.random_state)
     terminals = generate_terminal_profiles(cfg.n_terminals, cfg.random_state)
     transactions = generate_legitimate_transactions(customers, terminals, cfg)
+    if transactions.empty:
+        raise RuntimeError(
+            "Simulation produced no legitimate transactions; increase customers, days, or transaction frequency"
+        )
     transactions = add_fraud_scenarios(transactions, customers, terminals, cfg)
     customers.to_csv(CUSTOMERS_CSV, index=False)
     terminals.to_csv(TERMINALS_CSV, index=False)

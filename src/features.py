@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from .config import FEATURES
+from .config import DEFAULT_CUSTOMER_AVG_AMOUNT, FEATURES
+
+
+class OutOfOrderTransactionError(ValueError):
+    """Raised when an online event is older than already committed state."""
 
 
 def build_batch_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
@@ -29,8 +33,18 @@ def build_batch_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.
     # Customer amount baseline using only previous transactions.
     prior_sum = work.groupby("customer_id")["tx_amount"].cumsum() - work["tx_amount"]
     prior_count = work.groupby("customer_id").cumcount()
-    global_mean = work["tx_amount"].mean()
-    work["customer_avg_amount"] = np.where(prior_count > 0, prior_sum / prior_count, global_mean)
+    prior_global_count = np.arange(len(work))
+    prior_global_sum = work["tx_amount"].cumsum() - work["tx_amount"]
+    prior_global_mean = np.where(
+        prior_global_count > 0,
+        prior_global_sum / np.maximum(prior_global_count, 1),
+        DEFAULT_CUSTOMER_AVG_AMOUNT,
+    )
+    work["customer_avg_amount"] = np.where(
+        prior_count > 0,
+        prior_sum / np.maximum(prior_count, 1),
+        prior_global_mean,
+    )
     work["amount_ratio_customer"] = work["tx_amount"] / (work["customer_avg_amount"] + 1.0)
 
     # Time since last transaction.
@@ -38,10 +52,7 @@ def build_batch_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.
         work.groupby("customer_id")["tx_datetime"].diff().dt.total_seconds().fillna(86400)
     )
 
-    # Rolling counts over one hour and 24 hours.
-    # Implemented with deques to avoid pandas duplicate-timestamp index issues.
-    from collections import defaultdict, deque
-
+    # Rolling counts over one hour and 24 hours. Deques avoid duplicate-index issues.
     customer_windows = defaultdict(deque)
     terminal_windows = defaultdict(deque)
     count_1h = []
@@ -88,33 +99,66 @@ class OnlineFeatureStore:
     terminal_history: dict[Any, deque] = field(default_factory=lambda: defaultdict(deque))
     customer_amount_sum: dict[Any, float] = field(default_factory=lambda: defaultdict(float))
     customer_tx_count: dict[Any, int] = field(default_factory=lambda: defaultdict(int))
+    latest_customer_time: dict[Any, datetime] = field(default_factory=dict)
+    latest_terminal_time: dict[Any, datetime] = field(default_factory=dict)
+    global_amount_sum: float = 0.0
+    global_tx_count: int = 0
     seen_customer_terminals: set[tuple[Any, Any]] = field(default_factory=set)
     seen_customer_devices: set[tuple[Any, Any]] = field(default_factory=set)
 
-    def compute(self, tx: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, float]]:
+    def _normalise(self, tx: dict[str, Any]) -> tuple[datetime, Any, Any, Any, float]:
         dt = pd.to_datetime(tx["tx_datetime"]).to_pydatetime()
+        if pd.isna(dt):
+            raise ValueError("tx_datetime must be a valid datetime")
         customer_id = tx["customer_id"]
         terminal_id = tx["terminal_id"]
         device_id = tx.get("device_id", "unknown")
         amount = float(tx["tx_amount"])
+        if not np.isfinite(amount) or amount < 0:
+            raise ValueError("tx_amount must be a non-negative finite number")
+        return dt, customer_id, terminal_id, device_id, amount
+
+    def _validate_order(self, dt: datetime, customer_id: Any, terminal_id: Any) -> None:
+        customer_latest = self.latest_customer_time.get(customer_id)
+        terminal_latest = self.latest_terminal_time.get(terminal_id)
+        if customer_latest is not None and dt < customer_latest:
+            raise OutOfOrderTransactionError(
+                f"customer {customer_id!r} event at {dt.isoformat()} precedes committed state"
+            )
+        if terminal_latest is not None and dt < terminal_latest:
+            raise OutOfOrderTransactionError(
+                f"terminal {terminal_id!r} event at {dt.isoformat()} precedes committed state"
+            )
+
+    def preview(self, tx: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, float]]:
+        """Compute features without mutating state.
+
+        A caller can score and persist the event before calling :meth:`commit`, so
+        failed scoring attempts do not contaminate future behavioural features.
+        """
+        dt, customer_id, terminal_id, device_id, amount = self._normalise(tx)
+        self._validate_order(dt, customer_id, terminal_id)
         hour = dt.hour
 
         history = self.customer_history[customer_id]
         term_history = self.terminal_history[terminal_id]
+        valid_history = [t for t in history if (dt - t).total_seconds() <= 86400]
+        valid_term_history = [t for t in term_history if (dt - t).total_seconds() <= 86400]
 
-        while history and (dt - history[0]).total_seconds() > 86400:
-            history.popleft()
-        while term_history and (dt - term_history[0]).total_seconds() > 86400:
-            term_history.popleft()
-
-        count_24h = len(history)
-        count_1h = sum(1 for t in history if (dt - t).total_seconds() <= 3600)
-        terminal_count_24h = len(term_history)
+        count_24h = len(valid_history)
+        count_1h = sum(1 for t in valid_history if (dt - t).total_seconds() <= 3600)
+        terminal_count_24h = len(valid_term_history)
 
         tx_count = self.customer_tx_count[customer_id]
-        avg_amount = self.customer_amount_sum[customer_id] / tx_count if tx_count > 0 else amount
+        if tx_count > 0:
+            avg_amount = self.customer_amount_sum[customer_id] / tx_count
+        elif self.global_tx_count > 0:
+            avg_amount = self.global_amount_sum / self.global_tx_count
+        else:
+            avg_amount = DEFAULT_CUSTOMER_AVG_AMOUNT
         amount_ratio = amount / (avg_amount + 1.0)
-        time_since = (dt - history[-1]).total_seconds() if history else 86400
+        previous_time = self.latest_customer_time.get(customer_id)
+        time_since = (dt - previous_time).total_seconds() if previous_time else 86400
 
         pair_terminal = (customer_id, terminal_id)
         pair_device = (customer_id, device_id)
@@ -138,15 +182,33 @@ class OnlineFeatureStore:
             "is_new_device": int(is_new_device),
         }
 
-        # Update state after features are computed to avoid leakage.
+        return pd.DataFrame([raw], columns=FEATURES), raw
+
+    def commit(self, tx: dict[str, Any]) -> None:
+        """Commit an event after successful scoring and persistence."""
+        dt, customer_id, terminal_id, device_id, amount = self._normalise(tx)
+        self._validate_order(dt, customer_id, terminal_id)
+        history = self.customer_history[customer_id]
+        term_history = self.terminal_history[terminal_id]
+        while history and (dt - history[0]).total_seconds() > 86400:
+            history.popleft()
+        while term_history and (dt - term_history[0]).total_seconds() > 86400:
+            term_history.popleft()
         history.append(dt)
         term_history.append(dt)
         self.customer_amount_sum[customer_id] += amount
         self.customer_tx_count[customer_id] += 1
-        self.seen_customer_terminals.add(pair_terminal)
-        self.seen_customer_devices.add(pair_device)
+        self.global_amount_sum += amount
+        self.global_tx_count += 1
+        self.latest_customer_time[customer_id] = dt
+        self.latest_terminal_time[terminal_id] = dt
+        self.seen_customer_terminals.add((customer_id, terminal_id))
+        self.seen_customer_devices.add((customer_id, device_id))
 
-        return pd.DataFrame([raw], columns=FEATURES), raw
+    def compute(self, tx: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, float]]:
+        features = self.preview(tx)
+        self.commit(tx)
+        return features
 
 
 FEATURE_STORE = OnlineFeatureStore()
@@ -154,6 +216,14 @@ FEATURE_STORE = OnlineFeatureStore()
 
 def compute_online_features(tx: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, float]]:
     return FEATURE_STORE.compute(tx)
+
+
+def preview_online_features(tx: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, float]]:
+    return FEATURE_STORE.preview(tx)
+
+
+def commit_online_transaction(tx: dict[str, Any]) -> None:
+    FEATURE_STORE.commit(tx)
 
 
 def reset_feature_store() -> None:

@@ -1,82 +1,100 @@
-# Fraud Operations Platform — BBachelor Project Prototype
+# Fraud Operations Platform
 
+An end-to-end bachelor's project prototype for temporal card-fraud detection and analyst operations. The project goes beyond a notebook: it simulates a transaction stream, builds leakage-controlled behavioural features, trains a two-stage detector, persists decisions, and exposes an analyst workflow in Streamlit.
 
-This is an end-to-end fraud detection platform prototype, designed to look like a real system rather than a single notebook experiment.
+## Highlights
 
-## What it contains
+- Reproducible, handbook-inspired customer, terminal, and transaction simulation
+- Five time-dependent fraud scenarios with a configurable class-imbalance ceiling
+- Matching batch and online feature pipelines to reduce training-serving skew
+- Temporal train/test split rather than a random split
+- Fast Stage 1 logistic screen and a Stage 2 probability-averaging ensemble
+- Validated `APPROVE`, `REVIEW`, and `BLOCK` decision routing
+- SQLite persistence with WAL mode, indexes, foreign keys, and audit history
+- Responsive Streamlit event playback and analyst case management
+- Precision, recall, F1, ROC-AUC, PR-AUC, top-1% precision, latency, and routing metrics
+- Automated tests and GitHub Actions CI on Python 3.11 and 3.12
 
-- Handbook-inspired synthetic transaction simulator
-- Customer and terminal/merchant profile generation
-- Time-dependent fraud scenarios
-- Less-than-1%-style class imbalance target depending on configuration
-- Batch feature engineering for academic model training
-- Stateful online feature engineering for live transaction scoring
-- Two-stage detection architecture:
-  - Stage 1: fast Logistic Regression screen
-  - Stage 2: advanced soft-voting ensemble
-- Decision engine: approve, review, block
-- SQLite operational database
-- Analyst case-management workflow
-- Dashboard monitoring and model evaluation tabs
-- Threshold sweep and model-comparison outputs
-- Unit tests
+## Architecture
 
-## Source inspiration
+```mermaid
+flowchart LR
+    A[Simulator] --> B[Temporal features]
+    B --> C[Stage 1 screen]
+    C -->|Suspicious| D[Stage 2 ensemble]
+    C -->|Low risk| E[Decision engine]
+    D --> E
+    E --> F[(SQLite)]
+    F --> G[Dashboard and review]
+```
 
-The synthetic data design is inspired by the *Reproducible Machine Learning for Credit Card Fraud Detection — Practical Handbook*. The handbook motivates customer profiles, terminal profiles, customer-terminal proximity, daily transaction generation, imbalanced fraud labels, and time-dependent fraud scenarios.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the detailed data flow.
 
-Important: this project does **not** copy the handbook code directly. It implements a new project-specific simulator and extends it with extra operational fields such as country, device, channel, merchant category, reasons, latency, and analyst workflow.
+## Quick start
 
-## How to run
+Python 3.11 or 3.12 is recommended.
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate   # macOS/Linux
+source .venv/bin/activate        # macOS/Linux
+# .venv\Scripts\activate         # Windows PowerShell
+python -m pip install --upgrade pip
 pip install -r requirements.txt
+
 python train_models.py --customers 900 --terminals 1800 --days 55
 streamlit run app.py
 ```
 
-For a faster demo:
+For a quicker local demonstration:
 
 ```bash
 python train_models.py --customers 300 --terminals 600 --days 25 --max-transactions 25000
 streamlit run app.py
 ```
 
+The training command creates ignored runtime artifacts under `data/`, `models/`, and `reports/`.
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+The test suite covers feature-state behaviour, batch/online feature parity, invalid and out-of-order events, decision boundaries, database audit transitions, simulator configuration, model wrapper validation, and failure-safe pipeline state.
+
+## Project structure
+
+```text
+app.py                       Streamlit operations dashboard
+train_models.py              Simulation, temporal evaluation, and artifact export
+src/config.py                Paths, feature schema, and risk thresholds
+src/dataset_generator.py     Synthetic customers, terminals, and fraud scenarios
+src/features.py              Leakage-controlled batch and online features
+src/model_wrappers.py        Validated probability-averaging ensemble
+src/detector.py              Two-stage scoring and human-readable reasons
+src/decision_engine.py       Approve/review/block policy
+src/database.py              SQLite persistence and audit trail
+src/stream_processor.py      Validated end-to-end event pipeline
+tests/                       Automated test suite
+```
+
+## Reproducibility and safety
+
+- Simulation and model estimators use fixed random seeds.
+- Batch features use only information available before the current event.
+- The online store previews features and commits state only after successful scoring and persistence.
+- Out-of-order customer or terminal events are rejected instead of silently corrupting velocity features.
+- Missing or invalid model artifacts produce an actionable error.
+- Invalid scores and analyst status transitions are rejected.
+- Experiment metadata records the feature schema, thresholds, date range, package versions, and artifact version.
+
+## Academic scope and limitations
+
+The simulator is conceptually inspired by the *Reproducible Machine Learning for Credit Card Fraud Detection — Practical Handbook*, but this repository contains a project-specific implementation and additional operational fields and workflows.
+
+The data is synthetic, the live stream is an in-process simulation, and the explanations are rule-based summaries rather than causal model explanations. Results therefore demonstrate system design and experimental methodology; they do not establish production readiness. A production extension should add authenticated APIs, a durable message queue, a managed feature store, model registry and drift monitoring, role-based analyst access, encryption, and evaluation on legally available real data.
+
 ## Suggested report title
 
 **Design and Evaluation of a Real-Time Two-Stage Fraud Operations Platform Using Handbook-Inspired Synthetic Transaction Streams**
-
-## Suggested report structure
-
-1. Introduction and motivation
-2. Background on card fraud detection
-3. Dataset simulation design
-4. System requirements
-5. Architecture and data flow
-6. Feature engineering
-7. Model design and two-stage routing
-8. Experimental evaluation
-9. Operational dashboard and analyst workflow
-10. Limitations, ethics, and future work
-11. Conclusion
-
-## Academic strengths
-
-- It is a system, not just a classifier.
-- It uses realistic fraud-detection challenges: imbalance, temporal behaviour, customer history, merchant/terminal risk, and delayed analyst review.
-- It evaluates multiple models and compares operational trade-offs.
-- It explicitly measures Stage 2 call rate and inference latency.
-- It includes human-readable risk reasons and a feedback-oriented review workflow.
-
-## Key files
-
-- `src/dataset_generator.py` — synthetic dataset simulator
-- `src/features.py` — batch and online features
-- `train_models.py` — training, evaluation, metrics export
-- `src/detector.py` — two-stage scoring and explainability
-- `src/database.py` — SQLite persistence and review audit trail
-- `src/stream_processor.py` — ingestion-to-decision pipeline
-- `app.py` — Streamlit dashboard
-- `tests/` — unit tests

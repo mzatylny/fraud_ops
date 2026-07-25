@@ -10,6 +10,11 @@ CUSTOMERS_CSV = DATA_DIR / "customer_profiles.csv"
 TERMINALS_CSV = DATA_DIR / "terminal_profiles.csv"
 METRICS_CSV = REPORTS_DIR / "model_comparison.csv"
 THRESHOLD_CSV = REPORTS_DIR / "threshold_sweep.csv"
+EXPERIMENT_METADATA_JSON = REPORTS_DIR / "experiment_metadata.json"
+
+# The same cold-start baseline is used by batch and online feature engineering.
+# Keeping it explicit prevents training-serving skew for a customer's first event.
+DEFAULT_CUSTOMER_AVG_AMOUNT = 75.0
 FEATURES = [
     "tx_amount",
     "hour",
