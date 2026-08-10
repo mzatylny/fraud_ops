@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from math import isfinite
+from numbers import Integral, Real
 from typing import Any
 
 import pandas as pd
@@ -16,6 +18,51 @@ from .features import commit_online_transaction, preview_online_features
 REQUIRED_FIELDS = {"tx_datetime", "customer_id", "terminal_id", "tx_amount"}
 
 
+def _normalise_integer(value: Any, field: str, *, minimum: int | None = None) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer")
+    if isinstance(value, Integral):
+        result = int(value)
+    elif isinstance(value, str):
+        candidate = value.strip()
+        digits = candidate[1:] if candidate[:1] in {"+", "-"} else candidate
+        if not digits.isdigit():
+            raise ValueError(f"{field} must be an integer")
+        result = int(candidate)
+    elif isinstance(value, Real):
+        numeric_value = float(value)
+        if not isfinite(numeric_value) or not numeric_value.is_integer():
+            raise ValueError(f"{field} must be an integer")
+        result = int(numeric_value)
+    else:
+        raise ValueError(f"{field} must be an integer")
+    if minimum is not None and result < minimum:
+        raise ValueError(f"{field} must be at least {minimum}")
+    return result
+
+
+def _normalise_float(
+    value: Any,
+    field: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a finite number")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a finite number") from exc
+    if not isfinite(result):
+        raise ValueError(f"{field} must be a finite number")
+    if minimum is not None and result < minimum:
+        raise ValueError(f"{field} must be at least {minimum}")
+    if maximum is not None and result > maximum:
+        raise ValueError(f"{field} must be at most {maximum}")
+    return result
+
+
 def validate_transaction(tx: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalise the minimum event contract."""
     if not isinstance(tx, dict):
@@ -25,9 +72,12 @@ def validate_transaction(tx: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("missing required transaction fields: " + ", ".join(missing))
 
     normalised = dict(tx)
+    raw_timestamp = normalised["tx_datetime"]
+    if isinstance(raw_timestamp, bool) or not isinstance(raw_timestamp, (str, datetime)):
+        raise ValueError("tx_datetime must be a valid datetime")
     try:
-        timestamp = pd.to_datetime(normalised["tx_datetime"], errors="raise")
-    except (TypeError, ValueError) as exc:
+        timestamp = pd.Timestamp(pd.to_datetime(raw_timestamp, errors="raise"))
+    except (OverflowError, TypeError, ValueError) as exc:
         raise ValueError("tx_datetime must be a valid datetime") from exc
     if pd.isna(timestamp):
         raise ValueError("tx_datetime must be a valid datetime")
@@ -36,24 +86,32 @@ def validate_transaction(tx: dict[str, Any]) -> dict[str, Any]:
     normalised["tx_datetime"] = timestamp.isoformat()
 
     for field in ("customer_id", "terminal_id"):
-        value = normalised[field]
-        if isinstance(value, bool):
-            raise ValueError(f"{field} must be an integer")
-        try:
-            numeric_value = float(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{field} must be an integer") from exc
-        if not isfinite(numeric_value) or not numeric_value.is_integer():
-            raise ValueError(f"{field} must be an integer")
-        normalised[field] = int(numeric_value)
+        normalised[field] = _normalise_integer(normalised[field], field, minimum=0)
 
-    try:
-        amount = float(normalised["tx_amount"])
-    except (TypeError, ValueError) as exc:
-        raise ValueError("tx_amount must be a non-negative finite number") from exc
-    if not isfinite(amount) or amount < 0:
-        raise ValueError("tx_amount must be a non-negative finite number")
-    normalised["tx_amount"] = amount
+    normalised["tx_amount"] = _normalise_float(
+        normalised["tx_amount"], "tx_amount", minimum=0
+    )
+    if "transaction_id" in normalised:
+        normalised["transaction_id"] = _normalise_integer(
+            normalised["transaction_id"], "transaction_id", minimum=0
+        )
+    if "terminal_risk_score" in normalised:
+        normalised["terminal_risk_score"] = _normalise_float(
+            normalised["terminal_risk_score"],
+            "terminal_risk_score",
+            minimum=0,
+            maximum=1,
+        )
+    if "distance_to_terminal" in normalised:
+        normalised["distance_to_terminal"] = _normalise_float(
+            normalised["distance_to_terminal"], "distance_to_terminal", minimum=0
+        )
+    for field in ("is_foreign_country", "tx_fraud"):
+        if field in normalised:
+            value = _normalise_integer(normalised[field], field)
+            if value not in {0, 1}:
+                raise ValueError(f"{field} must be 0 or 1")
+            normalised[field] = value
     return normalised
 
 

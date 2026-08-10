@@ -9,7 +9,10 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Any
 
 import joblib
 import numpy as np
@@ -42,6 +45,23 @@ from src.config import (
 from src.dataset_generator import SimulationConfig, build_dataset
 from src.features import build_batch_features
 from src.model_wrappers import ProbabilityAveragingEnsemble
+
+
+def atomic_joblib_dump(model: Any, destination: Path) -> None:
+    """Replace a model artifact only after its complete contents reach disk."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as temporary_file:
+        temporary_path = Path(temporary_file.name)
+    try:
+        joblib.dump(model, temporary_path)
+        temporary_path.replace(destination)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def build_models() -> dict[str, object]:
@@ -241,12 +261,14 @@ def main() -> None:
     threshold_df = sweep_thresholds(y_test, hybrid_probs)
     threshold_df.to_csv(THRESHOLD_CSV, index=False)
 
-    joblib.dump(fitted["Logistic Regression"], MODELS_DIR / "stage1_model.joblib")
-    joblib.dump(fitted["Advanced Soft-Voting Ensemble"], MODELS_DIR / "stage2_model.joblib")
+    atomic_joblib_dump(fitted["Logistic Regression"], MODELS_DIR / "stage1_model.joblib")
+    atomic_joblib_dump(
+        fitted["Advanced Soft-Voting Ensemble"], MODELS_DIR / "stage2_model.joblib"
+    )
 
     metadata = {
         "artifact_version": 2,
-        "trained_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "trained_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "n_transactions": int(len(tx)),
         "fraud_rate": float(tx.tx_fraud.mean()),
         "n_train": int(len(X_train)),

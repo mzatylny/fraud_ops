@@ -9,35 +9,64 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from .config import MODELS_DIR, STAGE1_THRESHOLD
+from .config import FEATURES, MODELS_DIR, STAGE1_THRESHOLD
 
 _STAGE1 = None
 _STAGE2 = None
+_MODEL_SIGNATURE: tuple[tuple[int, int, int], tuple[int, int, int]] | None = None
 
 
 class ModelArtifactError(RuntimeError):
     """Raised when trained model artifacts are unavailable or invalid."""
 
 
+def _validate_model(model: Any, name: str) -> None:
+    if not callable(getattr(model, "predict_proba", None)):
+        raise ModelArtifactError(f"{name} does not provide predict_proba")
+    feature_count = getattr(model, "n_features_in_", None)
+    if feature_count is not None and int(feature_count) != len(FEATURES):
+        raise ModelArtifactError(
+            f"{name} expects {feature_count} features, but the application expects {len(FEATURES)}"
+        )
+    feature_names = getattr(model, "feature_names_in_", None)
+    if feature_names is not None and [str(value) for value in feature_names] != FEATURES:
+        raise ModelArtifactError(f"{name} was trained with a different feature schema")
+
+
 def load_models() -> tuple[Any, Any]:
-    global _STAGE1, _STAGE2
+    global _MODEL_SIGNATURE, _STAGE1, _STAGE2
     stage1_path = MODELS_DIR / "stage1_model.joblib"
     stage2_path = MODELS_DIR / "stage2_model.joblib"
     missing = [str(path) for path in (stage1_path, stage2_path) if not path.exists()]
     if missing:
+        _STAGE1 = None
+        _STAGE2 = None
+        _MODEL_SIGNATURE = None
         raise ModelArtifactError(
             "Model artifacts are missing. Run `python train_models.py` first. Missing: "
             + ", ".join(missing)
         )
+    paths = (stage1_path, stage2_path)
+    signature = tuple(
+        (path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_size) for path in paths
+    )
+    if _STAGE1 is not None and _STAGE2 is not None and signature == _MODEL_SIGNATURE:
+        return _STAGE1, _STAGE2
     try:
-        if _STAGE1 is None:
-            _STAGE1 = joblib.load(stage1_path)
-        if _STAGE2 is None:
-            _STAGE2 = joblib.load(stage2_path)
+        stage1 = joblib.load(stage1_path)
+        stage2 = joblib.load(stage2_path)
+        _validate_model(stage1, "Stage 1 model")
+        _validate_model(stage2, "Stage 2 model")
     except Exception as exc:
         _STAGE1 = None
         _STAGE2 = None
+        _MODEL_SIGNATURE = None
+        if isinstance(exc, ModelArtifactError):
+            raise
         raise ModelArtifactError(f"Could not load model artifacts: {exc}") from exc
+    _STAGE1 = stage1
+    _STAGE2 = stage2
+    _MODEL_SIGNATURE = signature
     return _STAGE1, _STAGE2
 
 

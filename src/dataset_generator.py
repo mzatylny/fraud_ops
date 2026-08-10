@@ -39,8 +39,19 @@ class SimulationConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if self.n_days < 7:
             raise ValueError("n_days must be at least 7 to simulate temporal fraud scenarios")
-        if not np.isfinite(self.radius) or self.radius <= 0:
+        if (
+            isinstance(self.radius, bool)
+            or not isinstance(self.radius, (int, float))
+            or not np.isfinite(self.radius)
+            or self.radius <= 0
+        ):
             raise ValueError("radius must be a positive finite number")
+        if (
+            not isinstance(self.random_state, int)
+            or isinstance(self.random_state, bool)
+            or self.random_state < 0
+        ):
+            raise ValueError("random_state must be a non-negative integer")
         if self.max_transactions is not None and (
             not isinstance(self.max_transactions, int)
             or isinstance(self.max_transactions, bool)
@@ -320,7 +331,11 @@ def add_fraud_scenarios(
     return df
 
 
-def build_dataset(cfg: SimulationConfig = SimulationConfig()) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def build_dataset(
+    cfg: SimulationConfig | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if cfg is None:
+        cfg = SimulationConfig()
     _ensure_dirs()
     customers = generate_customer_profiles(cfg.n_customers, cfg.random_state)
     terminals = generate_terminal_profiles(cfg.n_terminals, cfg.random_state)

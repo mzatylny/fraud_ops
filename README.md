@@ -1,5 +1,7 @@
 # Fraud Operations Platform
 
+[![CI](https://github.com/mzatylny/fraud_ops/actions/workflows/ci.yml/badge.svg)](https://github.com/mzatylny/fraud_ops/actions/workflows/ci.yml)
+
 An end-to-end bachelor's project prototype for temporal card-fraud detection and analyst operations. The project goes beyond a notebook: it simulates a transaction stream, builds leakage-controlled behavioural features, trains a two-stage detector, persists decisions, and exposes an analyst workflow in Streamlit.
 
 ## Highlights
@@ -7,8 +9,10 @@ An end-to-end bachelor's project prototype for temporal card-fraud detection and
 - Reproducible, handbook-inspired customer, terminal, and transaction simulation
 - Five time-dependent fraud scenarios with a configurable class-imbalance ceiling
 - Matching batch and online feature pipelines to reduce training-serving skew
+- Strict stream-event validation before features, scoring, or persistence
 - Temporal train/test split rather than a random split
 - Fast Stage 1 logistic screen and a Stage 2 probability-averaging ensemble
+- Automatic model-artifact reload with feature-schema compatibility checks
 - Validated `APPROVE`, `REVIEW`, and `BLOCK` decision routing
 - SQLite persistence with WAL mode, indexes, foreign keys, and audit history
 - Responsive Streamlit event playback and analyst case management
@@ -58,10 +62,14 @@ The training command creates ignored runtime artifacts under `data/`, `models/`,
 
 ```bash
 pip install -r requirements-dev.txt
+ruff check .
 python -m pytest
 ```
 
-The test suite covers feature-state behaviour, batch/online feature parity, invalid and out-of-order events, decision boundaries, database audit transitions, simulator configuration, model wrapper validation, and failure-safe pipeline state.
+The test suite covers feature-state behaviour, batch/online feature parity, invalid and
+out-of-order events, decision boundaries, database audit transitions, simulator
+configuration, model artifact reloads, model wrapper validation, and failure-safe
+pipeline state. GitHub Actions runs linting and the full suite on Python 3.11 and 3.12.
 
 ## Project structure
 
@@ -84,8 +92,10 @@ tests/                       Automated test suite
 - Simulation and model estimators use fixed random seeds.
 - Batch features use only information available before the current event.
 - The online store previews features and commits state only after successful scoring and persistence.
+- Boolean, non-finite, out-of-range, and malformed stream values are rejected at ingestion.
 - Out-of-order customer or terminal events are rejected instead of silently corrupting velocity features.
 - Missing or invalid model artifacts produce an actionable error.
+- Updated model artifacts are reloaded automatically and checked against the live feature schema.
 - Invalid scores and analyst status transitions are rejected.
 - Experiment metadata records the feature schema, thresholds, date range, package versions, and artifact version.
 

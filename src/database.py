@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
@@ -16,6 +17,7 @@ VALID_REVIEW_STATUSES = {
     "CONFIRMED_FRAUD",
     "FALSE_POSITIVE",
 }
+VALID_ACTIONS = {"APPROVE", "REVIEW", "BLOCK"}
 ALLOWED_STATUS_TRANSITIONS = {
     "PENDING": {"UNDER_REVIEW", "CONFIRMED_FRAUD", "FALSE_POSITIVE"},
     "UNDER_REVIEW": {"CONFIRMED_FRAUD", "FALSE_POSITIVE"},
@@ -25,7 +27,7 @@ ALLOWED_STATUS_TRANSITIONS = {
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _connect() -> sqlite3.Connection:
@@ -56,10 +58,10 @@ def init_db(reset: bool = False) -> None:
                 device_id TEXT,
                 channel TEXT,
                 merchant_category TEXT,
-                risk_score REAL,
-                action TEXT,
+                risk_score REAL CHECK(risk_score >= 0 AND risk_score <= 1),
+                action TEXT CHECK(action IN ('APPROVE', 'REVIEW', 'BLOCK')),
                 layer TEXT,
-                latency_ms REAL,
+                latency_ms REAL CHECK(latency_ms >= 0),
                 status TEXT,
                 reasons TEXT,
                 analyst_notes TEXT,
@@ -98,28 +100,62 @@ def init_db(reset: bool = False) -> None:
         conn.commit()
 
 
+def _finite_float(
+    record: dict[str, Any],
+    field: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    value = record.get(field)
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a finite number")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a finite number") from exc
+    if not math.isfinite(result):
+        raise ValueError(f"{field} must be a finite number")
+    if minimum is not None and result < minimum:
+        raise ValueError(f"{field} must be at least {minimum}")
+    if maximum is not None and result > maximum:
+        raise ValueError(f"{field} must be at most {maximum}")
+    return result
+
+
 def insert_transaction(record: dict[str, Any]) -> None:
     now = _utc_now()
-    status = "PENDING" if record["action"] == "REVIEW" else "AUTO_RESOLVED"
+    tx_id = str(record.get("tx_id", "")).strip()
+    if not tx_id:
+        raise ValueError("tx_id must be a non-empty string")
+    action = str(record.get("action", ""))
+    if action not in VALID_ACTIONS:
+        raise ValueError(f"unknown transaction action: {action}")
+    ground_truth = record.get("tx_fraud", 0)
+    if isinstance(ground_truth, bool) or ground_truth not in {0, 1}:
+        raise ValueError("tx_fraud must be 0 or 1")
+    status = "PENDING" if action == "REVIEW" else "AUTO_RESOLVED"
     values = {
-        "tx_id": record["tx_id"],
-        "transaction_id": int(record.get("transaction_id", -1)),
+        "tx_id": tx_id,
+        "transaction_id": (
+            int(record["transaction_id"]) if record.get("transaction_id") is not None else None
+        ),
         "tx_datetime": str(record.get("tx_datetime")),
         "customer_id": int(record.get("customer_id", -1)),
         "terminal_id": int(record.get("terminal_id", -1)),
-        "tx_amount": float(record.get("tx_amount", 0.0)),
+        "tx_amount": _finite_float(record, "tx_amount", minimum=0),
         "country": str(record.get("country", "")),
         "device_id": str(record.get("device_id", "")),
         "channel": str(record.get("channel", "")),
         "merchant_category": str(record.get("merchant_category", "")),
-        "risk_score": float(record.get("risk_score", 0.0)),
-        "action": str(record.get("action", "")),
+        "risk_score": _finite_float(record, "risk_score", minimum=0, maximum=1),
+        "action": action,
         "layer": str(record.get("layer", "")),
-        "latency_ms": float(record.get("latency_ms", 0.0)),
+        "latency_ms": _finite_float(record, "latency_ms", minimum=0),
         "status": status,
         "reasons": str(record.get("reasons", "")),
         "analyst_notes": "",
-        "ground_truth": int(record.get("tx_fraud", 0)),
+        "ground_truth": int(ground_truth),
         "fraud_scenario": str(record.get("fraud_scenario", "unknown")),
         "created_at": now,
         "updated_at": now,

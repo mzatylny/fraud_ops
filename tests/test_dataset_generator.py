@@ -14,6 +14,8 @@ from src.dataset_generator import (
         {"n_terminals": -1},
         {"n_days": 6},
         {"radius": 0},
+        {"radius": True},
+        {"random_state": -1},
         {"max_transactions": 0},
         {"target_max_fraud_rate": 1.0},
         {"start_date": "not-a-date"},

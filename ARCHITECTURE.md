@@ -27,10 +27,13 @@ flowchart TD
 4. Candidate models are evaluated and the Stage 1 and Stage 2 artifacts are persisted with experiment metadata.
 5. The dashboard selects an ordered event sample and submits one event per responsive UI rerun.
 6. The online feature store previews the event without mutating historical state.
-7. Stage 1 scores every event; only suspicious events invoke the stronger Stage 2 ensemble.
-8. The validated decision engine routes the score to approve, manual review, or block.
-9. The event is inserted into SQLite. Only after successful persistence is the online feature state committed.
-10. Review status transitions and notes are validated and appended to an audit history.
+7. The ingestion boundary normalises identifiers and timestamps and rejects malformed,
+   non-finite, or out-of-range feature values.
+8. Stage 1 scores every event; only suspicious events invoke the stronger Stage 2 ensemble.
+9. Model artifacts are reloaded when they change and must match the configured feature schema.
+10. The validated decision engine routes the score to approve, manual review, or block.
+11. The event is inserted into SQLite. Only after successful persistence is the online feature state committed.
+12. Review status transitions and notes are validated and appended to an audit history.
 
 ## Reliability boundaries
 

@@ -1,8 +1,5 @@
-from pathlib import Path
-
 import sqlite3
 
-import pandas as pd
 import pytest
 
 from src import database
@@ -80,3 +77,21 @@ def test_auto_resolved_transaction_cannot_enter_review(tmp_path, monkeypatch):
     database.insert_transaction(_record(action="APPROVE"))
     with pytest.raises(ValueError, match="routed to REVIEW"):
         database.update_transaction_status("abc", "UNDER_REVIEW")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"tx_id": ""},
+        {"action": "ALLOW"},
+        {"risk_score": float("nan")},
+        {"risk_score": 1.1},
+        {"latency_ms": -1},
+        {"tx_fraud": 2},
+    ],
+)
+def test_database_rejects_invalid_operational_records(tmp_path, monkeypatch, change):
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "test.db")
+    database.init_db(reset=True)
+    with pytest.raises(ValueError):
+        database.insert_transaction({**_record(), **change})
