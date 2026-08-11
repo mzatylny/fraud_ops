@@ -16,6 +16,7 @@ concurrency:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -38,4 +39,10 @@ jobs:
         run: ruff check .
 
       - name: Test
-        run: python -m pytest
+        run: python -m pytest --cov=src --cov-report=term-missing --cov-fail-under=70
+
+      - name: Static security analysis
+        run: bandit -r src train_models.py -q
+
+      - name: Dependency audit
+        run: pip-audit --local

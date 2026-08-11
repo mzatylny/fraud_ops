@@ -64,7 +64,9 @@ def test_database_rejects_duplicates_and_invalid_updates(tmp_path, monkeypatch):
     database.init_db(reset=True)
     database.insert_transaction(_record())
     with pytest.raises(sqlite3.IntegrityError):
-        database.insert_transaction(_record())
+        database.insert_transaction({**_record(), "transaction_id": None})
+    with pytest.raises(database.DuplicateTransactionError, match="already processed"):
+        database.insert_transaction(_record(tx_id="different"))
     with pytest.raises(KeyError):
         database.update_transaction_status("missing", "UNDER_REVIEW")
     with pytest.raises(ValueError):
@@ -95,3 +97,16 @@ def test_database_rejects_invalid_operational_records(tmp_path, monkeypatch, cha
     database.init_db(reset=True)
     with pytest.raises(ValueError):
         database.insert_transaction({**_record(), **change})
+
+
+def test_database_persists_model_and_policy_provenance(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "test.db")
+    database.init_db(reset=True)
+    database.insert_transaction(
+        {**_record(), "model_release": "release-123", "policy_version": "policy-7"}
+    )
+    row = database.get_transactions().iloc[0]
+    assert row.model_release == "release-123"
+    assert row.policy_version == "policy-7"
+    assert database.transaction_exists(1)
+    assert not database.transaction_exists(999)

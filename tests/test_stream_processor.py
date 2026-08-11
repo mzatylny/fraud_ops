@@ -70,9 +70,22 @@ def test_failed_persistence_does_not_commit_feature_state(monkeypatch):
         "score_transaction",
         lambda frame, raw: (0.2, "Stage 1 (Fast Screen)", "normal", 0.1),
     )
+    monkeypatch.setattr(stream_processor, "active_model_release", lambda: "test-release")
     monkeypatch.setattr(stream_processor, "insert_transaction", lambda record: (_ for _ in ()).throw(RuntimeError("db")))
     monkeypatch.setattr(stream_processor, "commit_online_transaction", committed.append)
 
     with pytest.raises(RuntimeError, match="db"):
         stream_processor.process_transaction(valid_transaction())
     assert committed == []
+
+
+def test_duplicate_source_event_is_rejected_before_feature_preview(monkeypatch):
+    transaction = {**valid_transaction(), "transaction_id": 42}
+    monkeypatch.setattr(stream_processor, "transaction_exists", lambda transaction_id: True)
+    monkeypatch.setattr(
+        stream_processor,
+        "preview_online_features",
+        lambda tx: pytest.fail("duplicate event reached feature computation"),
+    )
+    with pytest.raises(stream_processor.DuplicateTransactionError, match="already processed"):
+        stream_processor.process_transaction(transaction)

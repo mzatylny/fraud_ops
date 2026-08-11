@@ -5,6 +5,7 @@ __pycache__/
 .DS_Store
 models/*.joblib
 models/*.tmp
+models/*.json
 data/*.csv
 data/*.db
 data/*.db-shm
@@ -12,3 +13,5 @@ data/*.db-wal
 reports/*.csv
 reports/*.json
 .pytest_cache/
+.coverage
+htmlcov/

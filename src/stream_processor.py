@@ -10,9 +10,10 @@ from typing import Any
 
 import pandas as pd
 
-from .database import insert_transaction
+from .config import POLICY_VERSION
+from .database import DuplicateTransactionError, insert_transaction, transaction_exists
 from .decision_engine import make_decision
-from .detector import score_transaction
+from .detector import active_model_release, score_transaction
 from .features import commit_online_transaction, preview_online_features
 
 REQUIRED_FIELDS = {"tx_datetime", "customer_id", "terminal_id", "tx_amount"}
@@ -117,6 +118,9 @@ def validate_transaction(tx: dict[str, Any]) -> dict[str, Any]:
 
 def process_transaction(tx: dict[str, Any]) -> dict[str, Any]:
     tx = validate_transaction(tx)
+    transaction_id = tx.get("transaction_id")
+    if transaction_id is not None and transaction_exists(transaction_id):
+        raise DuplicateTransactionError(f"transaction_id already processed: {transaction_id}")
     features_df, raw_features = preview_online_features(tx)
     risk_score, layer, reasons, latency_ms = score_transaction(features_df, raw_features)
     action = make_decision(risk_score)
@@ -129,6 +133,8 @@ def process_transaction(tx: dict[str, Any]) -> dict[str, Any]:
             "reasons": reasons,
             "latency_ms": latency_ms,
             "action": action,
+            "model_release": active_model_release(),
+            "policy_version": POLICY_VERSION,
         }
     )
     insert_transaction(record)

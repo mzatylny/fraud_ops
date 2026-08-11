@@ -7,7 +7,6 @@ Run:
 from __future__ import annotations
 
 import argparse
-import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,7 +35,10 @@ from src.config import (
     DEFAULT_CUSTOMER_AVG_AMOUNT,
     EXPERIMENT_METADATA_JSON,
     METRICS_CSV,
+    MODEL_MANIFEST_JSON,
     MODELS_DIR,
+    MONITORING_BASELINE_JSON,
+    POLICY_VERSION,
     REPORTS_DIR,
     REVIEW_THRESHOLD,
     STAGE1_THRESHOLD,
@@ -44,7 +46,9 @@ from src.config import (
 )
 from src.dataset_generator import SimulationConfig, build_dataset
 from src.features import build_batch_features
+from src.model_registry import atomic_write_json, create_release_manifest
 from src.model_wrappers import ProbabilityAveragingEnsemble
+from src.monitoring import create_monitoring_baseline
 
 
 def atomic_joblib_dump(model: Any, destination: Path) -> None:
@@ -266,16 +270,37 @@ def main() -> None:
         fitted["Advanced Soft-Voting Ensemble"], MODELS_DIR / "stage2_model.joblib"
     )
 
+    trained_at_utc = datetime.now(UTC).isoformat(timespec="seconds")
+    thresholds = {
+        "stage1": STAGE1_THRESHOLD,
+        "review": REVIEW_THRESHOLD,
+        "block": BLOCK_THRESHOLD,
+    }
+    manifest = create_release_manifest(
+        MODELS_DIR,
+        features=list(X.columns),
+        policy_version=POLICY_VERSION,
+        thresholds=thresholds,
+        created_at_utc=trained_at_utc,
+    )
+    atomic_write_json(MODEL_MANIFEST_JSON, manifest)
+    baseline = create_monitoring_baseline(
+        test_rows,
+        hybrid_probs,
+        model_release=manifest["release_id"],
+    )
+    atomic_write_json(MONITORING_BASELINE_JSON, baseline)
+
     metadata = {
-        "artifact_version": 2,
-        "trained_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+        "artifact_version": 3,
+        "trained_at_utc": trained_at_utc,
+        "model_release": manifest["release_id"],
+        "policy_version": POLICY_VERSION,
         "n_transactions": int(len(tx)),
         "fraud_rate": float(tx.tx_fraud.mean()),
         "n_train": int(len(X_train)),
         "n_test": int(len(X_test)),
-        "stage1_threshold": STAGE1_THRESHOLD,
-        "review_threshold": REVIEW_THRESHOLD,
-        "block_threshold": BLOCK_THRESHOLD,
+        "thresholds": thresholds,
         "stage2_call_rate": float(stage2_call_rate),
         "features": list(X.columns),
         "feature_count": int(X.shape[1]),
@@ -287,15 +312,21 @@ def main() -> None:
             "pandas": pd.__version__,
             "scikit_learn": sklearn.__version__,
         },
+        "release_manifest": str(MODEL_MANIFEST_JSON.relative_to(MODEL_MANIFEST_JSON.parent.parent)),
+        "monitoring_baseline": str(
+            MONITORING_BASELINE_JSON.relative_to(MONITORING_BASELINE_JSON.parent.parent)
+        ),
     }
-    with open(EXPERIMENT_METADATA_JSON, "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2)
+    atomic_write_json(EXPERIMENT_METADATA_JSON, metadata)
 
     print("\n--- MODEL COMPARISON FOR REPORT ---")
     print(results_df.round(4).to_string())
     print(f"\nSaved metrics to {METRICS_CSV}")
     print(f"Saved threshold sweep to {THRESHOLD_CSV}")
     print("Saved models to models/stage1_model.joblib and models/stage2_model.joblib")
+    print(f"Model release: {manifest['release_id']} | policy: {POLICY_VERSION}")
+    print(f"Saved release manifest to {MODEL_MANIFEST_JSON}")
+    print(f"Saved monitoring baseline to {MONITORING_BASELINE_JSON}")
 
 
 if __name__ == "__main__":

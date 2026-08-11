@@ -1,0 +1,14 @@
+services:
+  fraud-ops:
+    build: .
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - fraud-data:/app/data
+
+volumes:
+  fraud-data:

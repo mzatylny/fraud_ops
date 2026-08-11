@@ -9,11 +9,20 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from .config import FEATURES, MODELS_DIR, STAGE1_THRESHOLD
+from .config import (
+    BLOCK_THRESHOLD,
+    FEATURES,
+    MODELS_DIR,
+    POLICY_VERSION,
+    REVIEW_THRESHOLD,
+    STAGE1_THRESHOLD,
+)
+from .model_registry import ModelManifestError, validate_release_manifest
 
 _STAGE1 = None
 _STAGE2 = None
-_MODEL_SIGNATURE: tuple[tuple[int, int, int], tuple[int, int, int]] | None = None
+_MODEL_SIGNATURE: tuple[tuple[int, int, int], ...] | None = None
+_ACTIVE_RELEASE_ID: str | None = None
 
 
 class ModelArtifactError(RuntimeError):
@@ -34,25 +43,38 @@ def _validate_model(model: Any, name: str) -> None:
 
 
 def load_models() -> tuple[Any, Any]:
-    global _MODEL_SIGNATURE, _STAGE1, _STAGE2
+    global _ACTIVE_RELEASE_ID, _MODEL_SIGNATURE, _STAGE1, _STAGE2
     stage1_path = MODELS_DIR / "stage1_model.joblib"
     stage2_path = MODELS_DIR / "stage2_model.joblib"
-    missing = [str(path) for path in (stage1_path, stage2_path) if not path.exists()]
+    manifest_path = MODELS_DIR / "model_manifest.json"
+    paths = (stage1_path, stage2_path, manifest_path)
+    missing = [str(path) for path in paths if not path.exists()]
     if missing:
         _STAGE1 = None
         _STAGE2 = None
         _MODEL_SIGNATURE = None
+        _ACTIVE_RELEASE_ID = None
         raise ModelArtifactError(
-            "Model artifacts are missing. Run `python train_models.py` first. Missing: "
+            "Model release artifacts are missing. Run `python train_models.py` first. Missing: "
             + ", ".join(missing)
         )
-    paths = (stage1_path, stage2_path)
     signature = tuple(
         (path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_size) for path in paths
     )
     if _STAGE1 is not None and _STAGE2 is not None and signature == _MODEL_SIGNATURE:
         return _STAGE1, _STAGE2
     try:
+        manifest = validate_release_manifest(
+            manifest_path,
+            MODELS_DIR,
+            FEATURES,
+            expected_policy_version=POLICY_VERSION,
+            expected_thresholds={
+                "stage1": STAGE1_THRESHOLD,
+                "review": REVIEW_THRESHOLD,
+                "block": BLOCK_THRESHOLD,
+            },
+        )
         stage1 = joblib.load(stage1_path)
         stage2 = joblib.load(stage2_path)
         _validate_model(stage1, "Stage 1 model")
@@ -61,13 +83,25 @@ def load_models() -> tuple[Any, Any]:
         _STAGE1 = None
         _STAGE2 = None
         _MODEL_SIGNATURE = None
+        _ACTIVE_RELEASE_ID = None
         if isinstance(exc, ModelArtifactError):
             raise
+        if isinstance(exc, ModelManifestError):
+            raise ModelArtifactError(str(exc)) from exc
         raise ModelArtifactError(f"Could not load model artifacts: {exc}") from exc
     _STAGE1 = stage1
     _STAGE2 = stage2
     _MODEL_SIGNATURE = signature
+    _ACTIVE_RELEASE_ID = str(manifest["release_id"])
     return _STAGE1, _STAGE2
+
+
+def active_model_release() -> str:
+    if _ACTIVE_RELEASE_ID is None:
+        load_models()
+    if _ACTIVE_RELEASE_ID is None:  # pragma: no cover - defensive invariant
+        raise ModelArtifactError("model release is unavailable")
+    return _ACTIVE_RELEASE_ID
 
 
 def explain(features: dict[str, float], score: float, layer: str) -> str:

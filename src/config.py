@@ -11,6 +11,8 @@ TERMINALS_CSV = DATA_DIR / "terminal_profiles.csv"
 METRICS_CSV = REPORTS_DIR / "model_comparison.csv"
 THRESHOLD_CSV = REPORTS_DIR / "threshold_sweep.csv"
 EXPERIMENT_METADATA_JSON = REPORTS_DIR / "experiment_metadata.json"
+MONITORING_BASELINE_JSON = REPORTS_DIR / "monitoring_baseline.json"
+MODEL_MANIFEST_JSON = MODELS_DIR / "model_manifest.json"
 
 # The same cold-start baseline is used by batch and online feature engineering.
 # Keeping it explicit prevents training-serving skew for a customer's first event.
@@ -34,3 +36,4 @@ FEATURES = [
 STAGE1_THRESHOLD = 0.25
 REVIEW_THRESHOLD = 0.35
 BLOCK_THRESHOLD = 0.85
+POLICY_VERSION = "2026-08-11-v1"

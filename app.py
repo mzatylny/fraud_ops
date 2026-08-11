@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 
 import pandas as pd
 import streamlit as st
 
-from src.config import METRICS_CSV, THRESHOLD_CSV, TRANSACTIONS_CSV
+from src.config import METRICS_CSV, MONITORING_BASELINE_JSON, THRESHOLD_CSV, TRANSACTIONS_CSV
 from src.database import (
     analytics_snapshot,
     get_review_cases,
@@ -16,6 +17,7 @@ from src.database import (
     update_transaction_status,
 )
 from src.features import reset_feature_store
+from src.monitoring import evaluate_operations
 from src.stream_processor import process_transaction
 
 LOGGER = logging.getLogger(__name__)
@@ -49,6 +51,13 @@ def load_metrics() -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def load_thresholds() -> pd.DataFrame:
     return pd.read_csv(THRESHOLD_CSV) if THRESHOLD_CSV.exists() else pd.DataFrame()
+
+
+@st.cache_data(show_spinner=False)
+def load_monitoring_baseline() -> dict:
+    if not MONITORING_BASELINE_JSON.exists():
+        return {}
+    return json.loads(MONITORING_BASELINE_JSON.read_text(encoding="utf-8"))
 
 
 def style_action(value: str) -> str:
@@ -99,14 +108,14 @@ with st.sidebar:
     stream_rows = st.slider("Events in this run", 50, 2000, 500, 50)
 
     if st.session_state.streaming:
-        if st.button("Stop live stream", type="primary", use_container_width=True):
+        if st.button("Stop live stream", type="primary", width="stretch"):
             st.session_state.streaming = False
             st.rerun()
-    elif st.button("Start live stream", type="primary", use_container_width=True):
+    elif st.button("Start live stream", type="primary", width="stretch"):
         start_stream(stream_rows)
         st.rerun()
 
-    if st.button("Reset online feature store", use_container_width=True):
+    if st.button("Reset online feature store", width="stretch"):
         st.session_state.streaming = False
         st.session_state.stream_records = []
         st.session_state.stream_position = 0
@@ -170,11 +179,13 @@ with tab_live:
             "risk_score",
             "action",
             "layer",
+            "model_release",
+            "policy_version",
             "latency_ms",
         ]
         st.dataframe(
             recent_live[live_columns].style.map(style_action, subset=["action"]),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -213,7 +224,7 @@ with tab_queue:
                     "status",
                 ]
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
         notes = st.text_area(
@@ -222,20 +233,20 @@ with tab_queue:
             key=f"notes_{case_id}",
         )
         b1, b2, b3 = st.columns(3)
-        if b1.button("Start investigation", use_container_width=True):
+        if b1.button("Start investigation", width="stretch"):
             update_transaction_status(case_id, "UNDER_REVIEW", notes or "Investigation started")
             st.rerun()
-        if b2.button("Confirm fraud", use_container_width=True):
+        if b2.button("Confirm fraud", width="stretch"):
             update_transaction_status(case_id, "CONFIRMED_FRAUD", notes)
             st.rerun()
-        if b3.button("Mark false positive", use_container_width=True):
+        if b3.button("Mark false positive", width="stretch"):
             update_transaction_status(case_id, "FALSE_POSITIVE", notes)
             st.rerun()
 
         history = get_review_history(case_id)
         if not history.empty:
             with st.expander("Audit history"):
-                st.dataframe(history, use_container_width=True, hide_index=True)
+                st.dataframe(history, width="stretch", hide_index=True)
 
 with tab_analytics:
     st.subheader("Operational monitoring")
@@ -250,6 +261,29 @@ with tab_analytics:
         m3.metric("Block rate", f"{snapshot.get('block_rate', 0) * 100:.2f}%")
         m4.metric("Stage 2 rate", f"{snapshot.get('stage2_rate', 0) * 100:.2f}%")
         m5.metric("Average latency", f"{snapshot.get('avg_latency_ms', 0):.2f} ms")
+
+        baseline = load_monitoring_baseline()
+        if baseline:
+            monitoring = evaluate_operations(recent, baseline)
+            st.markdown("#### Model health")
+            h1, h2, h3, h4 = st.columns(4)
+            h1.metric("Health", monitoring["status"].replace("_", " ").upper())
+            h2.metric("Data-quality errors", f"{monitoring['data_quality_error_rate']:.2%}")
+            h3.metric("p95 latency", f"{monitoring['p95_latency_ms']:.2f} ms")
+            h4.metric("Monitoring window", f"{monitoring['sample_size']:,}")
+            signal_frame = pd.DataFrame(monitoring["signals"])
+            st.dataframe(signal_frame, width="stretch", hide_index=True)
+            for alert in monitoring["alerts"]:
+                st.warning(alert)
+            if monitoring["active_model_releases"]:
+                st.caption(
+                    "Model release(s): "
+                    + ", ".join(monitoring["active_model_releases"])
+                    + " · Policy version(s): "
+                    + ", ".join(monitoring["active_policy_versions"])
+                )
+        else:
+            st.info("Monitoring baseline missing. Retrain models to enable drift detection.")
 
         col1, col2 = st.columns(2)
         with col1:
@@ -268,6 +302,7 @@ with tab_analytics:
             histogram = pd.cut(
                 recent["risk_score"], bins=[0, 0.2, 0.4, 0.6, 0.8, 1.0], include_lowest=True
             ).value_counts().sort_index()
+            histogram.index = histogram.index.astype(str)
             st.bar_chart(histogram)
 
         timeline = recent.copy()
@@ -287,7 +322,7 @@ with tab_eval:
     if metrics.empty:
         st.info("No metrics found. Run `python train_models.py` first.")
     else:
-        st.dataframe(metrics, use_container_width=True, hide_index=True)
+        st.dataframe(metrics, width="stretch", hide_index=True)
         numeric_columns = [
             column
             for column in ["precision", "recall", "f1", "roc_auc", "pr_auc", "precision_at_1_percent"]
@@ -322,7 +357,7 @@ with tab_data:
         ] if scenarios else dataset
         st.markdown("#### Fraud scenarios")
         st.bar_chart(dataset["fraud_scenario"].value_counts())
-        st.dataframe(filtered.head(500), use_container_width=True, hide_index=True)
+        st.dataframe(filtered.head(500), width="stretch", hide_index=True)
 
 if st.session_state.streaming:
     time.sleep(stream_speed)

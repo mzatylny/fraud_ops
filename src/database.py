@@ -9,7 +9,7 @@ from typing import Any
 
 import pandas as pd
 
-from .config import DB_PATH
+from .config import DB_PATH, POLICY_VERSION
 
 VALID_REVIEW_STATUSES = {
     "PENDING",
@@ -24,6 +24,10 @@ ALLOWED_STATUS_TRANSITIONS = {
     "CONFIRMED_FRAUD": {"UNDER_REVIEW"},
     "FALSE_POSITIVE": {"UNDER_REVIEW"},
 }
+
+
+class DuplicateTransactionError(RuntimeError):
+    """Raised when a source transaction is replayed."""
 
 
 def _utc_now() -> str:
@@ -67,11 +71,20 @@ def init_db(reset: bool = False) -> None:
                 analyst_notes TEXT,
                 ground_truth INTEGER,
                 fraud_scenario TEXT,
+                model_release TEXT,
+                policy_version TEXT,
                 created_at TEXT,
                 updated_at TEXT
             )
             """
         )
+        existing_columns = {
+            row[1] for row in cur.execute("PRAGMA table_info(transactions)").fetchall()
+        }
+        if "model_release" not in existing_columns:
+            cur.execute("ALTER TABLE transactions ADD COLUMN model_release TEXT")
+        if "policy_version" not in existing_columns:
+            cur.execute("ALTER TABLE transactions ADD COLUMN policy_version TEXT")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS review_events (
@@ -92,6 +105,10 @@ def init_db(reset: bool = False) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_transactions_datetime "
             "ON transactions(tx_datetime DESC)"
+        )
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_source_event "
+            "ON transactions(transaction_id) WHERE transaction_id IS NOT NULL"
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_review_events_tx_id "
@@ -157,14 +174,43 @@ def insert_transaction(record: dict[str, Any]) -> None:
         "analyst_notes": "",
         "ground_truth": int(ground_truth),
         "fraud_scenario": str(record.get("fraud_scenario", "unknown")),
+        "model_release": str(record.get("model_release", "unknown")),
+        "policy_version": str(record.get("policy_version", POLICY_VERSION)),
         "created_at": now,
         "updated_at": now,
     }
-    cols = ",".join(values.keys())
-    placeholders = ",".join("?" for _ in values)
     with _connect() as conn:
-        conn.execute(f"INSERT INTO transactions ({cols}) VALUES ({placeholders})", tuple(values.values()))
+        try:
+            conn.execute(
+                """
+                INSERT INTO transactions (
+                    tx_id, transaction_id, tx_datetime, customer_id, terminal_id,
+                    tx_amount, country, device_id, channel, merchant_category,
+                    risk_score, action, layer, latency_ms, status, reasons,
+                    analyst_notes, ground_truth, fraud_scenario, model_release,
+                    policy_version, created_at, updated_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                tuple(values.values()),
+            )
+        except sqlite3.IntegrityError as exc:
+            if "transactions.transaction_id" in str(exc):
+                raise DuplicateTransactionError(
+                    f"transaction_id already processed: {values['transaction_id']}"
+                ) from exc
+            raise
         conn.commit()
+
+
+def transaction_exists(transaction_id: int) -> bool:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM transactions WHERE transaction_id=? LIMIT 1",
+            (transaction_id,),
+        ).fetchone()
+    return row is not None
 
 
 def get_transactions(limit: int = 500) -> pd.DataFrame:
@@ -239,6 +285,8 @@ def analytics_snapshot(limit: int = 5000) -> dict[str, Any]:
         "stage2_rate": float((df["layer"] == "Stage 2 (Advanced)").mean()),
         "avg_latency_ms": float(df["latency_ms"].mean()),
         "avg_risk_score": float(df["risk_score"].mean()),
+        "model_releases": sorted(str(value) for value in df["model_release"].dropna().unique()),
+        "policy_versions": sorted(str(value) for value in df["policy_version"].dropna().unique()),
     }
     resolved = df[df["status"].isin(["CONFIRMED_FRAUD", "FALSE_POSITIVE"])]
     if not resolved.empty:
