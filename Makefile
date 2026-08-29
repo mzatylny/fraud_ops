@@ -7,7 +7,7 @@ test:
 	python -m pytest
 
 coverage:
-	python -m pytest --cov=src --cov-report=term-missing --cov-fail-under=70
+	python -m pytest --cov=src --cov=app --cov-report=term-missing --cov-fail-under=72
 
 lint:
 	ruff check .

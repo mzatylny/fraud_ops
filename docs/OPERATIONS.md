@@ -16,7 +16,10 @@ The UI is available at <http://localhost:8501>. Training is required after a fre
 make quality
 ```
 
-This runs linting, source coverage, static security analysis, and dependency auditing. The dashboard smoke test is part of the test suite.
+This runs linting, branch-aware coverage for both `src/` and `app.py`, static security
+analysis, and dependency auditing. Dashboard smoke and interaction tests are part of the
+test suite. GitHub Actions also verifies that the production container builds and runs
+CodeQL analysis independently.
 
 ## Health signals
 
