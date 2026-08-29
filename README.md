@@ -18,7 +18,7 @@ The point is not only to train a classifier. The repository demonstrates how to 
 | Event reliability | Strict boundary validation, replay rejection, and state commit only after durable persistence |
 | Decision traceability | Every stored decision records model release, policy version, score, reason, and audit history |
 | Observability | Data/prediction PSI, data-quality rate, p95 scoring latency, release/policy consistency alerts |
-| Delivery | 64 automated tests, dashboard smoke test, coverage gate, linting, security scan, dependency audit |
+| Delivery | Automated unit, integration, and dashboard interaction tests; coverage gate; linting; security scans; dependency audit; container build verification |
 | Runtime hardening | Non-root container, read-only root filesystem, health check, and persistent SQLite volume |
 
 ## System design
@@ -91,10 +91,15 @@ make quality
 The same controls run in GitHub Actions on Python 3.11 and 3.12:
 
 - Ruff linting
-- 64 unit, integration, parity, governance, monitoring, and UI smoke tests
-- Branch-aware source coverage with a 70% minimum
+- Unit, integration, parity, governance, monitoring, and dashboard interaction tests
+- Branch-aware coverage of both `src/` and the Streamlit entry point with a 72% minimum
 - Bandit static security analysis
 - `pip-audit` dependency vulnerability scanning
+- Reproducible container build verification
+- CodeQL analysis on pushes, pull requests, and a weekly schedule
+
+Dependabot checks Python and GitHub Actions dependencies weekly. Updates remain review-only;
+the repository does not auto-merge them.
 
 ## Repository map
 
