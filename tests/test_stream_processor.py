@@ -81,7 +81,7 @@ def test_failed_persistence_does_not_commit_feature_state(monkeypatch):
 
 def test_duplicate_source_event_is_rejected_before_feature_preview(monkeypatch):
     transaction = {**valid_transaction(), "transaction_id": 42}
-    monkeypatch.setattr(stream_processor, "transaction_exists", lambda transaction_id: True)
+    monkeypatch.setattr(stream_processor, "transaction_exists", lambda transaction_id, simulation_id: True)
     monkeypatch.setattr(
         stream_processor,
         "preview_online_features",
