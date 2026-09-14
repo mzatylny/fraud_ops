@@ -9,7 +9,7 @@ Delivery systems commonly retry events. Processing the same source transaction t
 
 ## Decision
 
-Use the upstream `transaction_id` as the idempotency key. Reject known IDs before feature preview and enforce a unique partial database index as the authoritative race-safe boundary. Commit online feature state only after the database insert succeeds.
+Use `(simulation_id, transaction_id)` as the idempotency key. Each UI start creates an independent simulation and a feature store private to that browser session. Callers that omit `simulation_id`, including existing integrations, use the `default` namespace. Existing database records migrate to that namespace without losing duplicate protection. Reject known IDs before feature preview and enforce a unique partial database index as the authoritative race-safe boundary. Commit online feature state only after the database insert succeeds.
 
 ## Consequences
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
@@ -16,7 +17,7 @@ from src.database import (
     init_db,
     update_transaction_status,
 )
-from src.features import reset_feature_store
+from src.features import OnlineFeatureStore
 from src.monitoring import evaluate_operations
 from src.stream_processor import process_transaction
 
@@ -76,6 +77,7 @@ def initialise_session_state() -> None:
         "stream_position": 0,
         "latest_result": None,
         "stream_error": None,
+        "stream_feature_store": OnlineFeatureStore(),
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -91,8 +93,11 @@ def start_stream(row_count: int) -> None:
         min(row_count, len(dataset)),
         random_state=time.time_ns() % (2**32 - 1),
     ).sort_values(["tx_datetime", "transaction_id"])
-    reset_feature_store()
-    st.session_state.stream_records = sample.to_dict("records")
+    simulation_id = uuid4().hex
+    st.session_state.stream_feature_store = OnlineFeatureStore()
+    st.session_state.stream_records = [
+        {**record, "simulation_id": simulation_id} for record in sample.to_dict("records")
+    ]
     st.session_state.stream_position = 0
     st.session_state.latest_result = None
     st.session_state.stream_error = None
@@ -120,7 +125,7 @@ with st.sidebar:
         st.session_state.stream_records = []
         st.session_state.stream_position = 0
         st.session_state.latest_result = None
-        reset_feature_store()
+        st.session_state.stream_feature_store = OnlineFeatureStore()
         st.success("Online feature store reset.")
 
     total = len(st.session_state.stream_records)
@@ -128,6 +133,7 @@ with st.sidebar:
         position = min(st.session_state.stream_position, total)
         st.progress(position / total, text=f"Processed {position:,} / {total:,}")
     st.info("Train artifacts first with `python train_models.py`.")
+    st.caption("Each start creates a new simulation. Previous results remain available.")
 
 # Process one event per Streamlit rerun. This keeps controls responsive and avoids
 # a long blocking loop in the UI thread.
@@ -138,11 +144,14 @@ if st.session_state.streaming:
         st.session_state.streaming = False
     else:
         try:
-            result = process_transaction(records[position])
+            result = process_transaction(
+                records[position], feature_store=st.session_state.stream_feature_store
+            )
             st.session_state.latest_result = result
             st.session_state.stream_position += 1
             if st.session_state.stream_position >= len(records):
                 st.session_state.streaming = False
+                st.rerun()
         except Exception as exc:  # Surface operational failures without losing the dashboard.
             LOGGER.exception("Live transaction processing failed")
             st.session_state.streaming = False

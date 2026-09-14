@@ -14,7 +14,7 @@ from .config import POLICY_VERSION
 from .database import DuplicateTransactionError, insert_transaction, transaction_exists
 from .decision_engine import make_decision
 from .detector import active_model_release, score_transaction
-from .features import commit_online_transaction, preview_online_features
+from .features import OnlineFeatureStore, commit_online_transaction, preview_online_features
 
 REQUIRED_FIELDS = {"tx_datetime", "customer_id", "terminal_id", "tx_amount"}
 
@@ -73,6 +73,10 @@ def validate_transaction(tx: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("missing required transaction fields: " + ", ".join(missing))
 
     normalised = dict(tx)
+    simulation_id = normalised.get("simulation_id", "default")
+    if not isinstance(simulation_id, str) or not simulation_id.strip() or len(simulation_id) > 128:
+        raise ValueError("simulation_id must be a non-empty string of at most 128 characters")
+    normalised["simulation_id"] = simulation_id
     raw_timestamp = normalised["tx_datetime"]
     if isinstance(raw_timestamp, bool) or not isinstance(raw_timestamp, (str, datetime)):
         raise ValueError("tx_datetime must be a valid datetime")
@@ -116,12 +120,16 @@ def validate_transaction(tx: dict[str, Any]) -> dict[str, Any]:
     return normalised
 
 
-def process_transaction(tx: dict[str, Any]) -> dict[str, Any]:
+def process_transaction(
+    tx: dict[str, Any], *, feature_store: OnlineFeatureStore | None = None
+) -> dict[str, Any]:
     tx = validate_transaction(tx)
     transaction_id = tx.get("transaction_id")
-    if transaction_id is not None and transaction_exists(transaction_id):
+    if transaction_id is not None and transaction_exists(transaction_id, tx["simulation_id"]):
         raise DuplicateTransactionError(f"transaction_id already processed: {transaction_id}")
-    features_df, raw_features = preview_online_features(tx)
+    preview = feature_store.preview if feature_store is not None else preview_online_features
+    commit = feature_store.commit if feature_store is not None else commit_online_transaction
+    features_df, raw_features = preview(tx)
     risk_score, layer, reasons, latency_ms = score_transaction(features_df, raw_features)
     action = make_decision(risk_score)
     record = dict(tx)
@@ -138,5 +146,5 @@ def process_transaction(tx: dict[str, Any]) -> dict[str, Any]:
         }
     )
     insert_transaction(record)
-    commit_online_transaction(tx)
+    commit(tx)
     return record

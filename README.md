@@ -51,6 +51,11 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for component boundaries and failure beha
 - Population Stability Index monitoring for transaction amounts, scores, and decision mix
 - Idempotent handling of upstream transaction IDs so retries cannot produce duplicate decisions
 
+Each **Start live stream** action creates an independent simulation with its own feature
+history. Prior decisions stay in SQLite; the same source event may appear in another
+simulation, while duplicate events within one simulation remain rejected. Existing
+records and callers without a simulation identifier use the `default` namespace.
+
 ## Quick start
 
 Python 3.11 or 3.12 is recommended.

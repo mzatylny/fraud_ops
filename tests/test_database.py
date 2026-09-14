@@ -110,3 +110,42 @@ def test_database_persists_model_and_policy_provenance(tmp_path, monkeypatch):
     assert row.policy_version == "policy-7"
     assert database.transaction_exists(1)
     assert not database.transaction_exists(999)
+
+
+def test_same_source_event_can_run_in_independent_simulations(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "test.db")
+    database.init_db()
+    database.insert_transaction({**_record("first"), "simulation_id": "run-1"})
+    database.insert_transaction({**_record("second"), "simulation_id": "run-2"})
+    with pytest.raises(database.DuplicateTransactionError):
+        database.insert_transaction({**_record("third"), "simulation_id": "run-1"})
+    assert database.transaction_exists(1, "run-1")
+    assert not database.transaction_exists(1)
+    assert len(database.get_transactions()) == 2
+
+
+def test_legacy_events_keep_duplicate_protection_after_migration(tmp_path, monkeypatch):
+    path = tmp_path / "legacy.db"
+    monkeypatch.setattr(database, "DB_PATH", path)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            "CREATE TABLE transactions (tx_id TEXT PRIMARY KEY, transaction_id INTEGER, "
+            "tx_datetime TEXT, action TEXT, status TEXT, risk_score REAL);"
+            "CREATE UNIQUE INDEX idx_transactions_source_event ON transactions(transaction_id);"
+            "INSERT INTO transactions(tx_id, transaction_id) VALUES ('old', 42);"
+        )
+    database.init_db()
+    database.init_db()
+    assert database.transaction_exists(42)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT simulation_id FROM transactions").fetchone()[0] == "default"
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO transactions(tx_id, transaction_id) VALUES ('retry', 42)")
+
+
+@pytest.mark.parametrize("simulation_id", [None, "", " " , 42, "x" * 129])
+def test_invalid_simulation_names_are_rejected(tmp_path, monkeypatch, simulation_id):
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "test.db")
+    database.init_db()
+    with pytest.raises(ValueError, match="simulation_id"):
+        database.insert_transaction({**_record(), "simulation_id": simulation_id})

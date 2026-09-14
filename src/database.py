@@ -54,6 +54,7 @@ def init_db(reset: bool = False) -> None:
             CREATE TABLE IF NOT EXISTS transactions (
                 tx_id TEXT PRIMARY KEY,
                 transaction_id INTEGER,
+                simulation_id TEXT NOT NULL DEFAULT 'default',
                 tx_datetime TEXT,
                 customer_id INTEGER,
                 terminal_id INTEGER,
@@ -85,6 +86,10 @@ def init_db(reset: bool = False) -> None:
             cur.execute("ALTER TABLE transactions ADD COLUMN model_release TEXT")
         if "policy_version" not in existing_columns:
             cur.execute("ALTER TABLE transactions ADD COLUMN policy_version TEXT")
+        if "simulation_id" not in existing_columns:
+            cur.execute(
+                "ALTER TABLE transactions ADD COLUMN simulation_id TEXT NOT NULL DEFAULT 'default'"
+            )
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS review_events (
@@ -106,9 +111,10 @@ def init_db(reset: bool = False) -> None:
             "CREATE INDEX IF NOT EXISTS idx_transactions_datetime "
             "ON transactions(tx_datetime DESC)"
         )
+        cur.execute("DROP INDEX IF EXISTS idx_transactions_source_event")
         cur.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_source_event "
-            "ON transactions(transaction_id) WHERE transaction_id IS NOT NULL"
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_simulation_event "
+            "ON transactions(simulation_id, transaction_id) WHERE transaction_id IS NOT NULL"
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_review_events_tx_id "
@@ -152,6 +158,9 @@ def insert_transaction(record: dict[str, Any]) -> None:
     if isinstance(ground_truth, bool) or ground_truth not in {0, 1}:
         raise ValueError("tx_fraud must be 0 or 1")
     status = "PENDING" if action == "REVIEW" else "AUTO_RESOLVED"
+    simulation_id = record.get("simulation_id", "default")
+    if not isinstance(simulation_id, str) or not simulation_id.strip() or len(simulation_id) > 128:
+        raise ValueError("simulation_id must be a non-empty string of at most 128 characters")
     values = {
         "tx_id": tx_id,
         "transaction_id": (
@@ -178,6 +187,7 @@ def insert_transaction(record: dict[str, Any]) -> None:
         "policy_version": str(record.get("policy_version", POLICY_VERSION)),
         "created_at": now,
         "updated_at": now,
+        "simulation_id": simulation_id,
     }
     with _connect() as conn:
         try:
@@ -188,9 +198,9 @@ def insert_transaction(record: dict[str, Any]) -> None:
                     tx_amount, country, device_id, channel, merchant_category,
                     risk_score, action, layer, latency_ms, status, reasons,
                     analyst_notes, ground_truth, fraud_scenario, model_release,
-                    policy_version, created_at, updated_at
+                    policy_version, created_at, updated_at, simulation_id
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 tuple(values.values()),
@@ -204,11 +214,11 @@ def insert_transaction(record: dict[str, Any]) -> None:
         conn.commit()
 
 
-def transaction_exists(transaction_id: int) -> bool:
+def transaction_exists(transaction_id: int, simulation_id: str = "default") -> bool:
     with _connect() as conn:
         row = conn.execute(
-            "SELECT 1 FROM transactions WHERE transaction_id=? LIMIT 1",
-            (transaction_id,),
+            "SELECT 1 FROM transactions WHERE transaction_id=? AND simulation_id=? LIMIT 1",
+            (transaction_id, simulation_id),
         ).fetchone()
     return row is not None
 
